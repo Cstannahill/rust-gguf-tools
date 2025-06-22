@@ -1,0 +1,13 @@
+[package]
+name = "gguf-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core GGUF parsing and writing library used by writer, inspector, and quantizer tools."
+license = "MIT"
+repository = "https://github.com/your-username/rust-gguf-tools" # optional
+
+[dependencies]
+byteorder = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0" # For error handling
+log = "0.4"       # Shared logging support (optional but useful)

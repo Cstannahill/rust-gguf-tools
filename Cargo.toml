@@ -1,5 +1,7 @@
 [workspace]
+resolver = "2"
 members = [
     "gguf-writer",
-    "gguf-inspect"
+    "gguf-inspect",
+    "crates/gguf-core",
 ]
