@@ -1,10 +1,13 @@
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, BufWriter, Write};
 use std::path::PathBuf;
 
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{LittleEndian};
+use byteorder::WriteBytesExt;
+
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+
+use gguf_core::reader::read_gguf_file;
+use gguf_core::types::{GGUFValue, GGUFTensor};
+use gguf_core::writer::write_gguf_file;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -29,6 +32,16 @@ enum QuantizationType {
     Unknown(String),
 }
 
+impl QuantizationType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            QuantizationType::Q4_0 => "Q4_0",
+            QuantizationType::Q5_1 => "Q5_1",
+            QuantizationType::Unknown(_) => "Unknown",
+        }
+    }
+}
+
 impl From<String> for QuantizationType {
     fn from(s: String) -> Self {
         match s.to_lowercase().as_str() {
@@ -39,118 +52,131 @@ impl From<String> for QuantizationType {
     }
 }
 
-/// Placeholder: Fake quantization that just casts f32s to u8s (lossy!)
-fn quantize_tensor(tensor: &[f32], _format: &QuantizationType) -> Vec<u8> {
-    tensor.iter().map(|v| (*v as u8)).collect()
+// === Q4_0 ===
+fn quantize_tensor_q4_0(tensor: &[f32]) -> Vec<u8> {
+    const BLOCK_SIZE: usize = 32;
+    let mut out = Vec::new();
+
+    for chunk in tensor.chunks(BLOCK_SIZE) {
+        let min = chunk.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = chunk.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let scale = (max - min).max(1e-6) / 15.0;
+        let zero = min;
+
+        let values: Vec<u8> = chunk
+            .iter()
+            .map(|v| ((*v - zero) / scale).round().clamp(0.0, 15.0) as u8)
+            .collect();
+
+        out.write_f32::<LittleEndian>(scale).unwrap();
+        out.write_f32::<LittleEndian>(zero).unwrap();
+
+        for pair in values.chunks(2) {
+            let byte = if pair.len() == 2 {
+                (pair[0] & 0x0F) | ((pair[1] & 0x0F) << 4)
+            } else {
+                pair[0] & 0x0F
+            };
+            out.push(byte);
+        }
+    }
+
+    out
 }
 
+// === Q5_1 ===
+fn quantize_tensor_q5_1(tensor: &[f32]) -> Vec<u8> {
+    const BLOCK_SIZE: usize = 32;
+    let mut out = Vec::new();
+
+    for chunk in tensor.chunks(BLOCK_SIZE) {
+        let min = chunk.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = chunk.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let scale = (max - min).max(1e-6) / 31.0;
+        let zero = min;
+
+        let levels: Vec<u8> = chunk
+            .iter()
+            .map(|v| (((*v - zero) / scale).round().clamp(0.0, 31.0)) as u8)
+            .collect();
+
+        let mut packed = Vec::with_capacity(20);
+        let mut buffer = 0u64;
+        let mut bits = 0;
+
+        for &val in &levels {
+            buffer |= (val as u64) << bits;
+            bits += 5;
+
+            while bits >= 8 {
+                packed.push((buffer & 0xFF) as u8);
+                buffer >>= 8;
+                bits -= 8;
+            }
+        }
+
+        if bits > 0 {
+            packed.push(buffer as u8);
+        }
+
+        out.write_f32::<LittleEndian>(scale).unwrap();
+        out.write_f32::<LittleEndian>(zero).unwrap();
+        out.extend_from_slice(&packed);
+    }
+
+    out
+}
+
+// === Dispatch ===
+fn quantize_tensor(tensor: &[f32], format: &QuantizationType) -> (Vec<f32>, u32) {
+    match format {
+        QuantizationType::Q4_0 => {
+            let bytes = quantize_tensor_q4_0(tensor);
+            let f32_compat: Vec<f32> = bytes.iter().map(|b| *b as f32).collect();
+            (f32_compat, 100)
+        }
+        QuantizationType::Q5_1 => {
+            let bytes = quantize_tensor_q5_1(tensor);
+            let f32_compat: Vec<f32> = bytes.iter().map(|b| *b as f32).collect();
+            (f32_compat, 101)
+        }
+        QuantizationType::Unknown(s) => panic!("Unsupported quantization format: {s}"),
+    }
+}
+
+// === Main ===
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
-    let format = QuantizationType::from(cli.format);
+    let format = QuantizationType::from(cli.format.clone());
 
     if matches!(format, QuantizationType::Unknown(_)) {
         eprintln!("❌ Unsupported quantization format: {}", cli.format);
         std::process::exit(1);
     }
 
-    let mut input = BufReader::new(File::open(&cli.input)?);
+    let (mut metadata, tensors) = read_gguf_file(&cli.input)?;
 
-    // === Read GGUF Header ===
-    let mut magic = [0u8; 4];
-    input.read_exact(&mut magic)?;
-    if &magic != b"GGUF" {
-        panic!("Not a GGUF file");
-    }
-
-    let version = input.read_u32::<LittleEndian>()?;
-    let tensor_count = input.read_u64::<LittleEndian>()?;
-    let metadata_count = input.read_u64::<LittleEndian>()?;
-
-    println!("📥 Loaded GGUF v{version} with {tensor_count} tensors");
-
-    // === Skip Metadata ===
-    for _ in 0..metadata_count {
-        let key_len = input.read_u64::<LittleEndian>()?;
-        input.seek(SeekFrom::Current(key_len as i64))?;
-        let value_type = input.read_u8()?;
-        match value_type {
-            1 => {
-                let len = input.read_u64::<LittleEndian>()?;
-                input.seek(SeekFrom::Current(len as i64))?;
+    let quantized: Vec<GGUFTensor> = tensors
+        .into_iter()
+        .map(|t| {
+            let (values, new_type_id) = quantize_tensor(&t.values, &format);
+            GGUFTensor {
+                name: t.name,
+                type_id: new_type_id,
+                dims: t.dims,
+                offset: 0,
+                values,
             }
-            9 | 11 | 12 => {
-                input.seek(SeekFrom::Current(8))?;
-            }
-            10 => {
-                input.seek(SeekFrom::Current(1))?;
-            }
-            _ => {}
-        }
-    }
+        })
+        .collect();
 
-    let mut quantized_tensors = Vec::new();
+    metadata.insert("quantized".into(), GGUFValue::Bool(true));
+    metadata.insert(
+        "quantization_format".into(),
+        GGUFValue::String(format.as_str().into()),
+    );
 
-    // === Read + Quantize Tensors ===
-    for _ in 0..tensor_count {
-        let name_len = input.read_u64::<LittleEndian>()?;
-        let mut name_bytes = vec![0u8; name_len as usize];
-        input.read_exact(&mut name_bytes)?;
-        let name = String::from_utf8_lossy(&name_bytes).to_string();
-
-        let type_id = input.read_u32::<LittleEndian>()?;
-        let ndim = input.read_u32::<LittleEndian>()?;
-        let mut dims = Vec::new();
-        for _ in 0..ndim {
-            dims.push(input.read_u64::<LittleEndian>()?);
-        }
-        let offset = input.read_u64::<LittleEndian>()?;
-
-        let mut raw_file = File::open(&cli.input)?;
-        raw_file.seek(SeekFrom::Start(offset))?;
-
-        let total_elems: u64 = dims.iter().product();
-        let mut float_data = Vec::new();
-        for _ in 0..total_elems {
-            float_data.push(raw_file.read_f32::<LittleEndian>()?);
-        }
-
-        let quantized = quantize_tensor(&float_data, &format);
-
-        quantized_tensors.push((name, type_id, dims, quantized));
-    }
-
-    // === Write New GGUF (quantized) ===
-    let mut out = BufWriter::new(File::create(&cli.output)?);
-    out.write_all(b"GGUF")?;
-    out.write_u32::<LittleEndian>(version)?;
-    out.write_u64::<LittleEndian>(quantized_tensors.len() as u64)?;
-    out.write_u64::<LittleEndian>(0)?; // skip metadata for now
-
-    // tensor headers
-    let mut offset_placeholders = Vec::new();
-    for (name, type_id, dims, _) in &quantized_tensors {
-        out.write_u64::<LittleEndian>(name.len() as u64)?;
-        out.write_all(name.as_bytes())?;
-        out.write_u32::<LittleEndian>(*type_id)?; // reuse original type_id for now
-        out.write_u32::<LittleEndian>(dims.len() as u32)?;
-        for d in dims {
-            out.write_u64::<LittleEndian>(*d)?;
-        }
-        offset_placeholders.push(out.seek(SeekFrom::Current(0))?);
-        out.write_u64::<LittleEndian>(0)?; // offset placeholder
-    }
-
-    for (i, (_, _, _, data)) in quantized_tensors.iter().enumerate() {
-        let data_offset = out.seek(SeekFrom::Current(0))?;
-        out.write_all(data)?;
-
-        let cur = out.seek(SeekFrom::Current(0))?;
-        out.seek(SeekFrom::Start(offset_placeholders[i]))?;
-        out.write_u64::<LittleEndian>(data_offset)?;
-        out.seek(SeekFrom::Start(cur))?;
-    }
-
-    out.flush()?;
+    write_gguf_file(&cli.output, &metadata, &quantized)?;
     println!("✅ Wrote quantized GGUF to {}", cli.output.display());
     Ok(())
 }

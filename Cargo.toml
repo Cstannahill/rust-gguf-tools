@@ -4,4 +4,5 @@ members = [
     "gguf-writer",
     "gguf-inspect",
     "crates/gguf-core",
+    "quantize-rs"
 ]

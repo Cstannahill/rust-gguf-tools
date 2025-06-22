@@ -8,3 +8,7 @@ clap = { version = "4.5.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
+byteorder = "1.5"
+gguf-core = { path = "../crates/gguf-core" }
+
+
