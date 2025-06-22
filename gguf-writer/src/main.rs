@@ -12,6 +12,10 @@ struct Cli {
     /// Output GGUF file path
     #[arg(short, long)]
     output: String,
+
+    /// Optional path to tensor definitions in JSON
+    #[arg(short, long)]
+    tensors: Option<String>,
 }
 
 fn main() {
@@ -21,7 +25,8 @@ fn main() {
     info!("Metadata path: {}", cli.metadata);
     info!("Output path: {}", cli.output);
 
-    match write_gguf::write_gguf_with_tensor(&cli.metadata, &cli.output){
+    match write_gguf::write_gguf_with_tensor(&cli.metadata, cli.tensors.as_deref(), &cli.output) {
+
         Ok(_) => println!("✅ GGUF file written to: {}", cli.output),
         Err(e) => eprintln!("❌ Error writing GGUF file: {e}"),
     }
