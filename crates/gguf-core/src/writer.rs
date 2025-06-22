@@ -27,7 +27,7 @@ pub fn write_gguf_file<P: AsRef<std::path::Path>>(
 
         match value {
             GGUFValue::String(s) => {
-                writer.write_u8(1)?; // type
+                writer.write_u8(1)?; // GGUFValueType::String
                 writer.write_u64::<LittleEndian>(s.len() as u64)?;
                 writer.write_all(s.as_bytes())?;
             }
@@ -48,35 +48,35 @@ pub fn write_gguf_file<P: AsRef<std::path::Path>>(
                 writer.write_f64::<LittleEndian>(*v)?;
             }
             GGUFValue::F32(v) => {
-                writer.write_u8(14)?;
+                writer.write_u8(13)?;
                 writer.write_f32::<LittleEndian>(*v)?;
             }
             GGUFValue::U8(v) => {
-                writer.write_u8(2)?;
+                writer.write_u8(3)?;
                 writer.write_u8(*v)?;
             }
             GGUFValue::I8(v) => {
-                writer.write_u8(3)?;
+                writer.write_u8(4)?;
                 writer.write_i8(*v)?;
             }
             GGUFValue::U16(v) => {
-                writer.write_u8(4)?;
+                writer.write_u8(5)?;
                 writer.write_u16::<LittleEndian>(*v)?;
             }
             GGUFValue::I16(v) => {
-                writer.write_u8(5)?;
+                writer.write_u8(6)?;
                 writer.write_i16::<LittleEndian>(*v)?;
             }
             GGUFValue::U32(v) => {
-                writer.write_u8(6)?;
+                writer.write_u8(7)?;
                 writer.write_u32::<LittleEndian>(*v)?;
             }
             GGUFValue::I32(v) => {
-                writer.write_u8(7)?;
+                writer.write_u8(8)?;
                 writer.write_i32::<LittleEndian>(*v)?;
             }
             GGUFValue::StringArray(arr) => {
-                writer.write_u8(13)?;
+                writer.write_u8(14)?;
                 writer.write_u64::<LittleEndian>(arr.len() as u64)?;
                 for s in arr {
                     writer.write_u64::<LittleEndian>(s.len() as u64)?;
@@ -89,14 +89,13 @@ pub fn write_gguf_file<P: AsRef<std::path::Path>>(
                 writer.write_all(data)?;
             }
             GGUFValue::Unknown(type_id) => {
-                // For unknown types, we just write the type_id without any data
                 writer.write_u8(*type_id)?;
             }
         }
     }
 
     // === TENSOR HEADERS ===
-    let mut offset_positions = Vec::new();
+    let mut offset_positions = Vec::with_capacity(tensors.len());
     for tensor in tensors {
         writer.write_u64::<LittleEndian>(tensor.name.len() as u64)?;
         writer.write_all(tensor.name.as_bytes())?;
@@ -106,20 +105,16 @@ pub fn write_gguf_file<P: AsRef<std::path::Path>>(
             writer.write_u64::<LittleEndian>(dim)?;
         }
 
-        // Save the position where the offset lives so we can backpatch later
         offset_positions.push(writer.seek(SeekFrom::Current(0))?);
-        writer.write_u64::<LittleEndian>(0)?; // offset placeholder
+        writer.write_u64::<LittleEndian>(0)?; // placeholder
     }
 
-    // === TENSOR DATA & PATCH OFFSETS ===
+    // === TENSOR BINARY PAYLOADS ===
     for (i, tensor) in tensors.iter().enumerate() {
         let data_offset = writer.seek(SeekFrom::Current(0))?;
+        writer.write_all(&tensor.values)?; // direct byte dump
 
-        for v in &tensor.values {
-            writer.write_f32::<LittleEndian>(*v)?;
-        }
-
-        // backpatch
+        // backpatch offset
         let return_pos = writer.seek(SeekFrom::Current(0))?;
         writer.seek(SeekFrom::Start(offset_positions[i]))?;
         writer.write_u64::<LittleEndian>(data_offset)?;

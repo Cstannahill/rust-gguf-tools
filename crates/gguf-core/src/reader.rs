@@ -99,14 +99,15 @@ pub fn read_gguf_file<P: AsRef<std::path::Path>>(
         }
 
         let offset = reader.read_u64::<LittleEndian>()?;
-        let count = dims.iter().product::<u64>();
 
-        let mut tensor_file = &file;
-        tensor_file.seek(SeekFrom::Start(offset))?;
-        let mut values = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            values.push(tensor_file.read_f32::<LittleEndian>()?);
-        }
+        // NOTE: we now read raw bytes instead of assuming f32s
+        let mut file_ref = &file;
+        file_ref.seek(SeekFrom::Start(offset))?;
+
+        // Calculate a conservative length estimate (for now):
+        let byte_count = 64 * dims.iter().product::<u64>() as usize;
+        let mut values = vec![0u8; byte_count];
+        file_ref.read(&mut values)?; // allow partial read for safety
 
         tensors.push(GGUFTensor {
             name,

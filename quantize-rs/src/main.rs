@@ -1,8 +1,5 @@
 use std::path::PathBuf;
-
-use byteorder::{LittleEndian};
-use byteorder::WriteBytesExt;
-
+use byteorder::{LittleEndian, WriteBytesExt};
 use clap::Parser;
 
 use gguf_core::reader::read_gguf_file;
@@ -128,18 +125,10 @@ fn quantize_tensor_q5_1(tensor: &[f32]) -> Vec<u8> {
 }
 
 // === Dispatch ===
-fn quantize_tensor(tensor: &[f32], format: &QuantizationType) -> (Vec<f32>, u32) {
+fn quantize_tensor(tensor: &[f32], format: &QuantizationType) -> (Vec<u8>, u32) {
     match format {
-        QuantizationType::Q4_0 => {
-            let bytes = quantize_tensor_q4_0(tensor);
-            let f32_compat: Vec<f32> = bytes.iter().map(|b| *b as f32).collect();
-            (f32_compat, 100)
-        }
-        QuantizationType::Q5_1 => {
-            let bytes = quantize_tensor_q5_1(tensor);
-            let f32_compat: Vec<f32> = bytes.iter().map(|b| *b as f32).collect();
-            (f32_compat, 101)
-        }
+        QuantizationType::Q4_0 => (quantize_tensor_q4_0(tensor), 100),
+        QuantizationType::Q5_1 => (quantize_tensor_q5_1(tensor), 101),
         QuantizationType::Unknown(s) => panic!("Unsupported quantization format: {s}"),
     }
 }
@@ -154,12 +143,23 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
+    // Load file
     let (mut metadata, tensors) = read_gguf_file(&cli.input)?;
 
+    // Convert and quantize tensors
     let quantized: Vec<GGUFTensor> = tensors
         .into_iter()
         .map(|t| {
-            let (values, new_type_id) = quantize_tensor(&t.values, &format);
+            let float_count = t.dims.iter().product::<u64>() as usize;
+            let mut floats = Vec::with_capacity(float_count);
+
+            for chunk in t.values.chunks_exact(4) {
+                let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                floats.push(val);
+            }
+
+            let (values, new_type_id) = quantize_tensor(&floats, &format);
+
             GGUFTensor {
                 name: t.name,
                 type_id: new_type_id,
@@ -170,6 +170,7 @@ fn main() -> std::io::Result<()> {
         })
         .collect();
 
+    // Update metadata
     metadata.insert("quantized".into(), GGUFValue::Bool(true));
     metadata.insert(
         "quantization_format".into(),

@@ -102,5 +102,5 @@ pub struct GGUFTensor {
     pub type_id: u32,
     pub dims: Vec<u64>,
     pub offset: u64,
-    pub values: Vec<f32>,
+    pub values: Vec<u8>,
 }

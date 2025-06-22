@@ -2,8 +2,9 @@ use clap::Parser;
 use log::info;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io;
+use std::io::{self};
 
+use byteorder::{LittleEndian, WriteBytesExt};
 use gguf_core::types::{GGUFValue, GGUFTensor};
 use gguf_core::writer::write_gguf_file;
 
@@ -68,34 +69,61 @@ fn main() -> io::Result<()> {
         metadata.insert(key, parsed);
     }
 
-    // === Load tensors or fall back to dummy ===
+    // === Load and encode tensors ===
     let tensors: Vec<GGUFTensor> = if let Some(tensor_path) = &cli.tensors {
         let file = File::open(tensor_path)?;
-        let defs: Vec<TensorDef> = serde_json::from_reader(file)?;        defs.into_iter()
-            .map(|def| GGUFTensor {
-                name: def.name,
-                type_id: def.type_id,
-                dims: def.dims,
-                offset: 0, // This will be set by the writer
-                values: def.values,
+        let defs: Vec<TensorDef> = serde_json::from_reader(file)?;
+
+        defs.into_iter()
+            .map(|def| {
+                let mut buf = Vec::with_capacity(def.values.len() * 4);
+                for v in def.values {
+                    buf.write_f32::<LittleEndian>(v).unwrap();
+                }
+
+                GGUFTensor {
+                    name: def.name,
+                    type_id: def.type_id,
+                    dims: def.dims,
+                    offset: 0,
+                    values: buf,
+                }
             })
             .collect()
-    } else {        vec![
-            GGUFTensor {
+    } else {
+        // fallback demo tensors
+        let fallback: Vec<TensorDef> = vec![
+            TensorDef {
                 name: "dummy_tensor_1".into(),
                 type_id: 0,
                 dims: vec![3],
-                offset: 0,
                 values: vec![1.0, 2.0, 3.0],
             },
-            GGUFTensor {
+            TensorDef {
                 name: "dummy_tensor_2".into(),
                 type_id: 0,
                 dims: vec![2, 2],
-                offset: 0,
                 values: vec![4.0, 5.0, 6.0, 7.0],
             },
-        ]
+        ];
+
+        fallback
+            .into_iter()
+            .map(|def| {
+                let mut buf = Vec::with_capacity(def.values.len() * 4);
+                for v in def.values {
+                    buf.write_f32::<LittleEndian>(v).unwrap();
+                }
+
+                GGUFTensor {
+                    name: def.name,
+                    type_id: def.type_id,
+                    dims: def.dims,
+                    offset: 0,
+                    values: buf,
+                }
+            })
+            .collect()
     };
 
     match write_gguf_file(&cli.output, &metadata, &tensors) {
