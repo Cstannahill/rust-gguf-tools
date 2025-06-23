@@ -104,3 +104,10 @@ pub struct GGUFTensor {
     pub offset: u64,
     pub values: Vec<u8>,
 }
+
+#[derive(Debug, Clone)]
+pub enum QuantizedTensor {
+    Q4_0 { scale: f32, zero: f32, values: Vec<u8> },
+    Q5_1 { scale: f32, zero: f32, values: Vec<u8> },
+    Unknown { raw: Vec<u8> },
+}

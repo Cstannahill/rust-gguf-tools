@@ -27,7 +27,7 @@ pub fn write_gguf_file<P: AsRef<std::path::Path>>(
 
         match value {
             GGUFValue::String(s) => {
-                writer.write_u8(1)?; // GGUFValueType::String
+                writer.write_u8(1)?;
                 writer.write_u64::<LittleEndian>(s.len() as u64)?;
                 writer.write_all(s.as_bytes())?;
             }
@@ -106,13 +106,13 @@ pub fn write_gguf_file<P: AsRef<std::path::Path>>(
         }
 
         offset_positions.push(writer.seek(SeekFrom::Current(0))?);
-        writer.write_u64::<LittleEndian>(0)?; // placeholder
+        writer.write_u64::<LittleEndian>(0)?; // reserve space for tensor offset
     }
 
     // === TENSOR BINARY PAYLOADS ===
     for (i, tensor) in tensors.iter().enumerate() {
         let data_offset = writer.seek(SeekFrom::Current(0))?;
-        writer.write_all(&tensor.values)?; // direct byte dump
+        writer.write_all(&tensor.values)?;
 
         // backpatch offset
         let return_pos = writer.seek(SeekFrom::Current(0))?;

@@ -14,3 +14,9 @@ Thumbs.db
 # === Metadata ===
 *.gguf
 *.json
+
+venv/
+temporary
+out
+merged-model/
+gguf-ready

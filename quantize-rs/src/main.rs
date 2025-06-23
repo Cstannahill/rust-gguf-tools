@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::Parser;
 
@@ -49,7 +50,6 @@ impl From<String> for QuantizationType {
     }
 }
 
-// === Q4_0 ===
 fn quantize_tensor_q4_0(tensor: &[f32]) -> Vec<u8> {
     const BLOCK_SIZE: usize = 32;
     let mut out = Vec::new();
@@ -81,7 +81,6 @@ fn quantize_tensor_q4_0(tensor: &[f32]) -> Vec<u8> {
     out
 }
 
-// === Q5_1 ===
 fn quantize_tensor_q5_1(tensor: &[f32]) -> Vec<u8> {
     const BLOCK_SIZE: usize = 32;
     let mut out = Vec::new();
@@ -94,10 +93,10 @@ fn quantize_tensor_q5_1(tensor: &[f32]) -> Vec<u8> {
 
         let levels: Vec<u8> = chunk
             .iter()
-            .map(|v| (((*v - zero) / scale).round().clamp(0.0, 31.0)) as u8)
+            .map(|v| ((*v - zero) / scale).round().clamp(0.0, 31.0) as u8)
             .collect();
 
-        let mut packed = Vec::with_capacity(20);
+        let mut packed = Vec::new();
         let mut buffer = 0u64;
         let mut bits = 0;
 
@@ -124,7 +123,6 @@ fn quantize_tensor_q5_1(tensor: &[f32]) -> Vec<u8> {
     out
 }
 
-// === Dispatch ===
 fn quantize_tensor(tensor: &[f32], format: &QuantizationType) -> (Vec<u8>, u32) {
     match format {
         QuantizationType::Q4_0 => (quantize_tensor_q4_0(tensor), 100),
@@ -133,7 +131,6 @@ fn quantize_tensor(tensor: &[f32], format: &QuantizationType) -> (Vec<u8>, u32) 
     }
 }
 
-// === Main ===
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
     let format = QuantizationType::from(cli.format.clone());
@@ -143,10 +140,8 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // Load file
     let (mut metadata, tensors) = read_gguf_file(&cli.input)?;
 
-    // Convert and quantize tensors
     let quantized: Vec<GGUFTensor> = tensors
         .into_iter()
         .map(|t| {
@@ -156,6 +151,15 @@ fn main() -> std::io::Result<()> {
             for chunk in t.values.chunks_exact(4) {
                 let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 floats.push(val);
+            }
+
+            if floats.len() != float_count {
+                panic!(
+                    "Tensor '{}' has {} floats, expected {}",
+                    t.name,
+                    floats.len(),
+                    float_count
+                );
             }
 
             let (values, new_type_id) = quantize_tensor(&floats, &format);
@@ -170,12 +174,13 @@ fn main() -> std::io::Result<()> {
         })
         .collect();
 
-    // Update metadata
-    metadata.insert("quantized".into(), GGUFValue::Bool(true));
+    // ⬇ Inject quantization metadata
+    metadata.insert("quantized".to_string(), GGUFValue::Bool(true));
     metadata.insert(
-        "quantization_format".into(),
-        GGUFValue::String(format.as_str().into()),
+        "quantization_format".to_string(),
+        GGUFValue::String(format.as_str().to_string()),
     );
+    metadata.insert("precision".to_string(), GGUFValue::F64(1.0)); // You can later replace this with a real loss metric
 
     write_gguf_file(&cli.output, &metadata, &quantized)?;
     println!("✅ Wrote quantized GGUF to {}", cli.output.display());
