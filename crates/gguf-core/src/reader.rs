@@ -9,7 +9,7 @@ use crate::types::{GGUFValue, GGUFValueType, GGUFTensor};
 pub fn read_gguf_file<P: AsRef<std::path::Path>>(
     path: P,
 ) -> io::Result<(BTreeMap<String, GGUFValue>, Vec<GGUFTensor>)> {
-    let file = File::open(&path)?;
+    let mut file = File::open(&path)?;
     let mut reader = BufReader::new(&file);
 
     let mut magic = [0u8; 4];
@@ -38,10 +38,7 @@ pub fn read_gguf_file<P: AsRef<std::path::Path>>(
                 reader.read_exact(&mut buf)?;
                 Some(GGUFValue::String(String::from_utf8_lossy(&buf).to_string()))
             }
-            GGUFValueType::Bool => {
-                let b = reader.read_u8()? != 0;
-                Some(GGUFValue::Bool(b))
-            }
+            GGUFValueType::Bool => Some(GGUFValue::Bool(reader.read_u8()? != 0)),
             GGUFValueType::U64 => Some(GGUFValue::U64(reader.read_u64::<LittleEndian>()?)),
             GGUFValueType::I64 => Some(GGUFValue::I64(reader.read_i64::<LittleEndian>()?)),
             GGUFValueType::F64 => Some(GGUFValue::F64(reader.read_f64::<LittleEndian>()?)),
@@ -84,7 +81,9 @@ pub fn read_gguf_file<P: AsRef<std::path::Path>>(
         }
     }
 
+    // === TENSOR HEADERS ===
     let mut tensors = Vec::new();
+    let mut tensor_headers = Vec::new();
     for _ in 0..tensor_count {
         let name_len = reader.read_u64::<LittleEndian>()?;
         let mut name_bytes = vec![0u8; name_len as usize];
@@ -100,20 +99,29 @@ pub fn read_gguf_file<P: AsRef<std::path::Path>>(
 
         let offset = reader.read_u64::<LittleEndian>()?;
 
-        // NOTE: we now read raw bytes instead of assuming f32s
-        let mut file_ref = &file;
-        file_ref.seek(SeekFrom::Start(offset))?;
+        tensor_headers.push((name, type_id, dims, offset));
+    }
 
-        // Calculate a conservative length estimate (for now):
-        let byte_count = 64 * dims.iter().product::<u64>() as usize;
-        let mut values = vec![0u8; byte_count];
-        file_ref.read(&mut values)?; // allow partial read for safety
+    // === TENSOR BLOBS ===
+    let file_len = file.metadata()?.len();
+    for i in 0..tensor_headers.len() {
+        let (name, type_id, dims, offset) = &tensor_headers[i];
+        let end = if i + 1 < tensor_headers.len() {
+            tensor_headers[i + 1].3
+        } else {
+            file_len
+        };
+
+        let size = end - offset;
+        file.seek(SeekFrom::Start(*offset))?;
+        let mut values = vec![0u8; size as usize];
+        file.read_exact(&mut values)?;
 
         tensors.push(GGUFTensor {
-            name,
-            type_id,
-            dims,
-            offset,
+            name: name.clone(),
+            type_id: *type_id,
+            dims: dims.clone(),
+            offset: *offset,
             values,
         });
     }
