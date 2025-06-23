@@ -6,14 +6,14 @@ A modular toolkit for creating, quantizing, inspecting, and validating [GGUF](ht
 
 ## 📦 Tools Overview
 
-| Tool                     | Purpose                                             |
-| ------------------------ | --------------------------------------------------- |
-| `gguf-writer`            | Writes GGUF from `meta.json` + `tensors.json`       |
-| `quantize-rs`            | Applies Q4_0 or Q5_1 quantization to float32 GGUF   |
-| `gguf-inspect`           | Dumps metadata and tensors from a `.gguf` file      |
-| `gguf-validate`          | Validates tensor decode logic for quantized GGUF    |
-| `huggingface_to_gguf.py` | Converts a HF model (or adapter) to GGUF-ready JSON |
-| `merge_adapter.py`       | Merges LoRA adapter into base model                 |
+| Tool            | Purpose                                             |
+| --------------- | --------------------------------------------------- |
+| `gguf-writer`   | Writes GGUF from `meta.json` + `tensors.json`       |
+| `quantize-rs`   | Applies Q4_0 or Q5_1 quantization to float32 GGUF   |
+| `gguf-inspect`  | Dumps metadata and tensors from a `.gguf` file      |
+| `gguf-validate` | Validates tensor decode logic for quantized GGUF    |
+| `hf_to_gguf.py` | Converts a HF model (or adapter) to GGUF-ready JSON |
+| `merge.py`      | Merges LoRA adapter into base model                 |
 
 ---
 
@@ -21,18 +21,18 @@ A modular toolkit for creating, quantizing, inspecting, and validating [GGUF](ht
 
 ```bash
 # Step 1: Convert Hugging Face model (or fine-tuned adapter)
-python huggingface_to_gguf.py \
+python hf_to_gguf.py \
   --model mistralai/Mistral-7B-v0.1 \
   --output-dir ./output/mistral
 
 # OR convert local fine-tuned adapter
-python huggingface_to_gguf.py \
+python hf_to_gguf.py \
   --model ./checkpoints/my-lora \
   --output-dir ./output/my-lora \
   --local
 
 # Step 2 (optional): Merge LoRA adapter into base model
-python merge_adapter.py \
+python merge.py \
   --base-model mistralai/Mistral-7B-v0.1 \
   --adapter ./checkpoints/my-lora \
   --output ./merged-model
