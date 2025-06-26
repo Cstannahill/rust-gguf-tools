@@ -58,7 +58,7 @@ cargo run --release -p gguf-validate -- test_q4.gguf
 
 ## 🧪 Python Scripts
 
-### huggingface_to_gguf.py
+### hf_to_gguf.py
 
 | Arg              | Description                                   |
 | ---------------- | --------------------------------------------- |
@@ -67,7 +67,7 @@ cargo run --release -p gguf-validate -- test_q4.gguf
 | `--local`        | Force local loading (default: auto-detect)    |
 | `--no-tokenizer` | Skip tokenizer saving                         |
 
-### merge_adapter.py
+### merge.py
 
 | Arg            | Description                                                 |
 | -------------- | ----------------------------------------------------------- |
