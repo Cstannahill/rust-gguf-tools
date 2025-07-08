@@ -2,7 +2,8 @@ use clap::Parser;
 use log::info;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self};
+use std::io::{self, Read};
+use std::path::Path;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use gguf_core::types::{GGUFValue, GGUFTensor};
@@ -14,30 +15,36 @@ use serde::Deserialize;
 mod hf_config_to_gguf;
 use hf_config_to_gguf::convert_config_to_metadata;
 
+/// ------------------------------
+/// CLI
+/// ------------------------------
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Path to metadata JSON
+    /// Optional metadata JSON file
     #[arg(short, long)]
-    metadata: String,
+    metadata: Option<String>,
 
-    /// Output GGUF file path
+    /// Output GGUF file
     #[arg(short, long)]
     output: String,
 
-    /// Optional path to tensor definitions in JSON
+    /// Tensor definitions in JSON
     #[arg(short, long)]
     tensors: Option<String>,
 
-    /// Optional path to tensors in safetensors format
+    /// Tensors in safetensors format
     #[arg(short = 's', long)]
     safetensors: Option<String>,
 
-    /// Optional path to HuggingFace config.json
+    /// HuggingFace `config.json`
     #[arg(long)]
     config: Option<String>,
 }
 
+/// ------------------------------
+/// TensorDef - only for JSON tensors
+/// ------------------------------
 #[derive(Debug, Deserialize)]
 struct TensorDef {
     name: String,
@@ -47,11 +54,13 @@ struct TensorDef {
     values: Vec<f32>,
 }
 
-fn parse_metadata(raw_metadata: BTreeMap<String, serde_json::Value>) -> BTreeMap<String, GGUFValue> {
-    let mut metadata = BTreeMap::new();
-
-    for (key, val) in raw_metadata {
-        let parsed = match val {
+/// ------------------------------
+/// Metadata helpers
+/// ------------------------------
+fn parse_metadata(raw: BTreeMap<String, serde_json::Value>) -> BTreeMap<String, GGUFValue> {
+    let mut out = BTreeMap::new();
+    for (k, v) in raw {
+        let val = match v {
             serde_json::Value::String(s) => GGUFValue::String(s),
             serde_json::Value::Number(n) => {
                 if let Some(u) = n.as_u64() {
@@ -61,21 +70,83 @@ fn parse_metadata(raw_metadata: BTreeMap<String, serde_json::Value>) -> BTreeMap
                 } else if let Some(f) = n.as_f64() {
                     GGUFValue::F64(f)
                 } else {
-                    eprintln!("⚠️ Skipping unsupported number: {n}");
+                    eprintln!("⚠️  Unsupported number for key {k}");
                     continue;
                 }
             }
             serde_json::Value::Bool(b) => GGUFValue::Bool(b),
             _ => {
-                eprintln!("⚠️ Skipping unsupported metadata key: {key}");
+                eprintln!("⚠️  Skipping unsupported metadata key {k}");
                 continue;
             }
         };
-        metadata.insert(key, parsed);
+        out.insert(k, val);
     }
-    metadata
+    out
 }
 
+fn parse_metadata_file(path: &str) -> io::Result<BTreeMap<String, GGUFValue>> {
+    let file = File::open(path)?;
+    let raw: BTreeMap<String, serde_json::Value> = serde_json::from_reader(file)?;
+    Ok(parse_metadata(raw))
+}
+
+fn build_default_metadata(
+    cfg_path: &Option<String>,
+    is_quantized: bool,
+    quant_fmt: &str,
+) -> io::Result<BTreeMap<String, GGUFValue>> {
+    let mut meta = BTreeMap::new();
+
+    // —— Core defaults ——
+    meta.insert("gguf_version".into(), GGUFValue::String("2".into()));
+    meta.insert(
+        "description".into(),
+        GGUFValue::String("Model converted from HuggingFace format".into()),
+    );
+    meta.insert("precision".into(), GGUFValue::F64(1.0));
+    meta.insert("is_quantized".into(), GGUFValue::Bool(is_quantized));
+    if is_quantized {
+        meta.insert(
+            "quantization_format".into(),
+            GGUFValue::String(quant_fmt.into()),
+        );
+    }
+
+    // —— Promote fields from HF config if provided ——
+    if let Some(p) = cfg_path {
+        let mut buf = Vec::new();
+        File::open(p)?.read_to_end(&mut buf)?;
+        let cfg: serde_json::Value = serde_json::from_slice(&buf)?;
+
+        if let Some(u) = cfg["max_position_embeddings"].as_u64() {
+            meta.insert("context_length".into(), GGUFValue::U64(u));
+        }
+        if let Some(u) = cfg["hidden_size"].as_u64() {
+            meta.insert("embedding_size".into(), GGUFValue::U64(u));
+        }
+        if let Some(name) = cfg["architectures"]
+            .get(0)
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+        {
+            meta.insert("name".into(), GGUFValue::String(name));
+        }
+
+        // merge any extra keys via helper
+        if let Ok(extra) = convert_config_to_metadata(p) {
+            for (k, v) in extra {
+                meta.entry(k).or_insert(v);
+            }
+        }
+    }
+
+    Ok(meta)
+}
+
+/// ------------------------------
+/// Tensor loaders
+/// ------------------------------
 fn load_tensors_from_json(path: &str) -> io::Result<Vec<GGUFTensor>> {
     let file = File::open(path)?;
     let defs: Vec<TensorDef> = serde_json::from_reader(file)?;
@@ -87,7 +158,6 @@ fn load_tensors_from_json(path: &str) -> io::Result<Vec<GGUFTensor>> {
             for v in def.values {
                 buf.write_f32::<LittleEndian>(v).unwrap();
             }
-
             GGUFTensor {
                 name: def.name,
                 type_id: def.type_id,
@@ -101,97 +171,91 @@ fn load_tensors_from_json(path: &str) -> io::Result<Vec<GGUFTensor>> {
 
 fn load_tensors_from_safetensors(path: &str) -> io::Result<(Vec<GGUFTensor>, bool)> {
     let data = fs::read(path)?;
-    let safetensors = SafeTensorFile::deserialize(&data)
+    let st = SafeTensorFile::deserialize(&data)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let mut tensors = Vec::new();
-    let mut used_float32 = true;
+    let mut out = Vec::new();
+    let mut all_f32 = true;
 
-    for (name, tensor_view) in safetensors.tensors() {
-        let dtype = tensor_view.dtype();
-        let dims = tensor_view.shape().iter().map(|&x| x as u64).collect::<Vec<_>>();
-
-        let tensor_data = match dtype {
-            Dtype::F32 => tensor_view.data().to_vec(),
-            Dtype::F16 => {
-                used_float32 = false;
-                use half::f16;
-                tensor_view
-                    .data()
+    for (name, tv) in st.tensors() {
+        let dims = tv.shape().iter().map(|&d| d as u64).collect::<Vec<_>>();
+        let bytes = match tv.dtype() {
+            Dtype::F32 => tv.data().to_vec(),
+            Dtype::F16 | Dtype::BF16 => {
+                all_f32 = false;
+                // convert to f32 little-endian
+                tv.data()
                     .chunks_exact(2)
-                    .flat_map(|chunk| {
-                        let bytes = [chunk[0], chunk[1]];
-                        let half = f16::from_le_bytes(bytes);
-                        half.to_f32().to_le_bytes()
+                    .flat_map(|c| {
+                        let [lo, hi] = [c[0], c[1]];
+                        let bits = match tv.dtype() {
+                            Dtype::F16 => {
+                                use half::f16;
+                                f16::from_le_bytes([lo, hi]).to_f32().to_bits()
+                            }
+                            Dtype::BF16 => ((hi as u32) << 24) | ((lo as u32) << 16),
+                            _ => unreachable!(),
+                        };
+                        bits.to_le_bytes()
                     })
-                    .collect::<Vec<u8>>()
+                    .collect()
             }
-            Dtype::BF16 => {
-                used_float32 = false;
-                tensor_view
-                    .data()
-                    .chunks_exact(2)
-                    .flat_map(|chunk| {
-                        let b1 = chunk[0] as u32;
-                        let b2 = chunk[1] as u32;
-                        let u32_val = (b2 << 24) | (b1 << 16);
-                        f32::from_bits(u32_val).to_le_bytes()
-                    })
-                    .collect::<Vec<u8>>()
-            }
-            _ => {
-                eprintln!("⚠️ Unsupported dtype for tensor '{}': {:?}", name, dtype);
+            other => {
+                eprintln!("⚠️  Unsupported dtype {:?} for {}", other, name);
                 continue;
             }
         };
 
-        tensors.push(GGUFTensor {
+        out.push(GGUFTensor {
             name: name.to_string(),
             type_id: 0,
             dims,
             offset: 0,
-            values: tensor_data,
+            values: bytes,
         });
     }
-
-    Ok((tensors, used_float32))
+    Ok((out, all_f32))
 }
 
+/// ------------------------------
+/// main
+/// ------------------------------
 fn main() -> io::Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
-    info!("Metadata path: {}", cli.metadata);
-    info!("Output path: {}", cli.output);
+    info!(
+        "Writer invoked → metadata: {:?}, output: {}",
+        cli.metadata, cli.output
+    );
 
-    let meta_file = File::open(&cli.metadata)?;
-    let raw_metadata: BTreeMap<String, serde_json::Value> = serde_json::from_reader(meta_file)?;
-    let mut metadata = parse_metadata(raw_metadata);
+    // crude heuristic: when we load from safetensors we haven't quantised yet
+    let is_quantized = cli.safetensors.is_none();
+    let quant_fmt = if is_quantized { "UNKNOWN" } else { "NA" };
 
-    // Add HF config promoted fields
-    if let Some(config_path) = &cli.config {
-        match convert_config_to_metadata(config_path) {
-            Ok(extra) => {
-                for (k, v) in extra {
-                    metadata.insert(k, v);
-                }
-            }
-            Err(e) => eprintln!("⚠️ Failed to load config metadata: {e}"),
-        }
-    }
-
-    let (tensors, _is_native_f32) = if let Some(safetensors_path) = &cli.safetensors {
-        info!("📦 Loading tensors from safetensors: {}", safetensors_path);
-        load_tensors_from_safetensors(safetensors_path)?
-    } else if let Some(tensor_path) = &cli.tensors {
-        info!("📦 Loading tensors from JSON: {}", tensor_path);
-        (load_tensors_from_json(tensor_path)?, true)
+    // -------- metadata ------------
+    let mut metadata: BTreeMap<String, GGUFValue> = if let Some(path) = &cli.metadata {
+        parse_metadata_file(path)?
     } else {
-        eprintln!("❌ No tensor input provided.");
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "No tensor input provided"));
+        build_default_metadata(&cli.config, is_quantized, quant_fmt)?
     };
 
+    // -------- tensors -------------
+    let (tensors, _native_f32) = if let Some(safe) = &cli.safetensors {
+        info!("📦  Loading tensors from safetensors: {safe}");
+        load_tensors_from_safetensors(safe)?
+    } else if let Some(json) = &cli.tensors {
+        info!("📦  Loading tensors from JSON: {json}");
+        (load_tensors_from_json(json)?, true)
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No tensor input provided",
+        ));
+    };
+
+    // -------- write ---------------
     write_gguf_file(&cli.output, &metadata, &tensors)?;
-    println!("✅ GGUF file written to: {}", cli.output);
+    println!("✅ GGUF file written to '{}'", cli.output);
     Ok(())
 }
